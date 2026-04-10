@@ -154,10 +154,26 @@ function getWord(document: vscode.TextDocument, position: vscode.Position): stri
 
 function countCaseReferences(files: FilesContentMap, name: string): number {
   let count = 0;
+  const caseStepTexts = new Set<string>();
+  const gherkinRefsByStepText = new Map<string, number>();
   Object.values(files).forEach((lines) => {
+    let currentCaseName: string | undefined;
     lines.forEach((line, index) => {
       const trimmed = line.trim();
       const indent = line.length - line.trimStart().length;
+
+      const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+      if (indent === 0 && topDef) {
+        currentCaseName = ROOT_NON_CASE_KEYS.has(topDef[1]) ? undefined : topDef[1];
+      }
+
+      if (currentCaseName === name) {
+        const stepDef = trimmed.match(/^Step\s*:\s*(.+)$/);
+        if (stepDef) {
+          caseStepTexts.add(normalizeFrameworkValue(stepDef[1]));
+        }
+      }
+
       const valueMatch = trimmed.match(/^Value\s*:\s*(.+)$/);
       if (valueMatch && normalizeFrameworkValue(valueMatch[1]) === name) {
         if (previousActionTypeIsCase(lines, index, indent)) {
@@ -177,9 +193,78 @@ function countCaseReferences(files: FilesContentMap, name: string): number {
           count += 1;
         }
       }
+
+      for (const key of GHERKIN_KEYS) {
+        const g = trimmed.match(new RegExp(`^-?\\s*${key}\\s*:\\s*(.+)$`));
+        if (g) {
+          const stepText = normalizeFrameworkValue(g[1]);
+          gherkinRefsByStepText.set(stepText, (gherkinRefsByStepText.get(stepText) ?? 0) + 1);
+          break;
+        }
+      }
     });
   });
+  caseStepTexts.forEach((stepText) => {
+    count += gherkinRefsByStepText.get(stepText) ?? 0;
+  });
   return count;
+}
+
+function getSemanticHoverName(document: vscode.TextDocument, position: vscode.Position): string | undefined {
+  const line = document.lineAt(position.line).text;
+  const trimmed = line.trim();
+  const indent = line.length - line.trimStart().length;
+  const currentKey = getCurrentKey(document, position);
+  const listParentKey = getListParentKey(document, position);
+  const colon = line.indexOf(":");
+
+  const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+  if (indent === 0 && topDef && !ROOT_NON_CASE_KEYS.has(topDef[1])) {
+    const start = line.indexOf(topDef[1]);
+    const end = start + topDef[1].length;
+    if (position.character >= start && position.character <= end) {
+      return topDef[1];
+    }
+  }
+
+  if (
+    currentKey === "Step" ||
+    currentKey === "Value" ||
+    currentKey === "Case" ||
+    (currentKey && GHERKIN_KEYS.includes(currentKey))
+  ) {
+    if (colon >= 0 && position.character > colon) {
+      const full = normalizeFrameworkValue(line.slice(colon + 1));
+      if (full) {
+        return full;
+      }
+    }
+  }
+
+  const listItem = trimmed.match(/^-\s*(.+)$/);
+  if (
+    listItem &&
+    (listParentKey === "Precases" || listParentKey === "Aftercases" || listParentKey === "Inherit")
+  ) {
+    return normalizeFrameworkValue(listItem[1]);
+  }
+
+  if (
+    currentKey === "Environment" ||
+    currentKey === "Role" ||
+    currentKey === "role" ||
+    currentKey === "App" ||
+    currentKey === "app"
+  ) {
+    if (colon >= 0 && position.character > colon) {
+      const full = normalizeFrameworkValue(line.slice(colon + 1));
+      if (full) {
+        return full;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export class YamlHoverProvider implements vscode.HoverProvider {
@@ -225,7 +310,8 @@ export class YamlHoverProvider implements vscode.HoverProvider {
       return new vscode.Hover(md);
     }
 
-    const word = getWord(document, position);
+    const semanticName = getSemanticHoverName(document, position);
+    const word = semanticName ?? getWord(document, position);
     if (!word) {
       return undefined;
     }
@@ -307,7 +393,7 @@ export class YamlHoverProvider implements vscode.HoverProvider {
             defs += 1;
           }
           for (const key of GHERKIN_KEYS) {
-            const m = line.trim().match(new RegExp(`^${key}\\s*:\\s*(.+)$`));
+            const m = line.trim().match(new RegExp(`^-?\\s*${key}\\s*:\\s*(.+)$`));
             if (m && normalizeFrameworkValue(m[1]) === word) {
               refs += 1;
             }

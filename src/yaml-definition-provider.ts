@@ -35,7 +35,7 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
   ): vscode.Location[] {
     this.logger?.startPerformanceLog("Total time: provideDefinition");
 
-    const name = this.getClicked(document, position);
+    const name = this.getSemanticNameAtPosition(document, position) ?? this.getClicked(document, position);
     this.logger?.log("Looking for defenition of: ", name);
 
     const cacheKey = `${vscode.workspace.name}-${name}`;
@@ -149,37 +149,46 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
   ): vscode.Location[] {
     const name = this.normalizeValue(rawName);
     const currentKey = this.getCurrentKey(document, position);
+    const lineText = document.lineAt(position.line).text;
+    const fullLineKey = lineText.trimStart().match(/^-?\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:/)?.[1];
+    const effectiveKey = currentKey ?? fullLineKey;
     const listParentKey = this.getListParentKey(document, position);
     if (!name) {
       return [];
     }
 
     if (
-      (currentKey === "Value" && this.isCaseValueContext(document, position)) ||
-      currentKey === "Case" ||
+      (effectiveKey === "Value" && this.isCaseValueContext(document, position)) ||
+      effectiveKey === "Case" ||
       listParentKey === "Precases" ||
       listParentKey === "Aftercases"
     ) {
-      return this.findCaseDefinitions(filesContentMap, name);
+      return this.uniqueLocations([
+        ...this.findCaseDefinitions(filesContentMap, name),
+        ...this.findCaseDefinitionsByStepText(filesContentMap, name),
+      ]);
     }
 
-    if (currentKey && GHERKIN_KEYS.includes(currentKey)) {
-      return this.findStepDefinitions(filesContentMap, name);
+    if (effectiveKey && GHERKIN_KEYS.includes(effectiveKey)) {
+      return this.uniqueLocations([
+        ...this.findStepDefinitions(filesContentMap, name),
+        ...this.findCaseDefinitionsByStepText(filesContentMap, name),
+      ]);
     }
 
-    if (currentKey === "Environment" || listParentKey === "Inherit") {
+    if (effectiveKey === "Environment" || listParentKey === "Inherit") {
       return this.isConfigDefinitionContext(document)
         ? this.findEnvironmentReferences(filesContentMap, name)
         : this.findEnvironmentDefinitions(filesContentMap, name);
     }
 
-    if (currentKey === "App" || currentKey === "app") {
+    if (effectiveKey === "App" || effectiveKey === "app") {
       return this.isConfigDefinitionContext(document)
         ? this.findAppReferences(filesContentMap, name)
         : this.findAppDefinitions(filesContentMap, name);
     }
 
-    if (currentKey === "Role" || currentKey === "role") {
+    if (effectiveKey === "Role" || effectiveKey === "role") {
       if (this.isCliVar(name)) {
         if (this.isMainRoleVar(name)) {
           return [];
@@ -237,6 +246,49 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
       }
       return this.normalizeValue(match[1]) === stepText;
     });
+  }
+
+  private findCaseDefinitionsByStepText(
+    filesContentMap: FilesContentMap,
+    stepText: string
+  ): vscode.Location[] {
+    const caseNames = this.getCaseNamesForStepText(filesContentMap, stepText);
+    return this.uniqueLocations(
+      caseNames.flatMap((caseName) => this.findCaseDefinitions(filesContentMap, caseName))
+    );
+  }
+
+  private getCaseNamesForStepText(
+    filesContentMap: FilesContentMap,
+    stepText: string
+  ): string[] {
+    const names = new Set<string>();
+    Object.values(filesContentMap).forEach((lines) => {
+      let currentCaseName: string | undefined;
+      lines.forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) {
+          return;
+        }
+        const indent = line.length - line.trimStart().length;
+        const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+        if (indent === 0 && topDef) {
+          currentCaseName = ROOT_NON_CASE_KEYS.has(topDef[1]) ? undefined : topDef[1];
+          return;
+        }
+        if (!currentCaseName) {
+          return;
+        }
+        const stepMatch = trimmed.match(/^Step\s*:\s*(.+)$/);
+        if (!stepMatch) {
+          return;
+        }
+        if (this.normalizeValue(stepMatch[1]) === stepText) {
+          names.add(currentCaseName);
+        }
+      });
+    });
+    return [...names];
   }
 
   private findEnvironmentDefinitions(
@@ -550,6 +602,70 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
       });
     });
     return locations;
+  }
+
+  private getSemanticNameAtPosition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): string | undefined {
+    const line = document.lineAt(position).text;
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    const currentKey = this.getCurrentKey(document, position);
+    const listParentKey = this.getListParentKey(document, position);
+    const fullLineKey = line.trimStart().match(/^-?\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:/)?.[1];
+    const effectiveKey = currentKey ?? fullLineKey;
+
+    const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+    if (indent === 0 && topDef && !ROOT_NON_CASE_KEYS.has(topDef[1])) {
+      const start = line.indexOf(topDef[1]);
+      const end = start + topDef[1].length;
+      if (position.character >= start && position.character <= end) {
+        return topDef[1];
+      }
+    }
+
+    if (
+      effectiveKey === "Value" ||
+      effectiveKey === "Case" ||
+      effectiveKey === "Step" ||
+      effectiveKey === "Environment" ||
+      effectiveKey === "Role" ||
+      effectiveKey === "role" ||
+      effectiveKey === "App" ||
+      effectiveKey === "app" ||
+      (effectiveKey && GHERKIN_KEYS.includes(effectiveKey))
+    ) {
+      const colon = line.indexOf(":");
+      if (colon >= 0 && position.character > colon) {
+        const value = this.normalizeValue(line.slice(colon + 1));
+        if (value) {
+          return value;
+        }
+      }
+    }
+
+    const listItem = trimmed.match(/^-\s*(.+)$/);
+    if (
+      listItem &&
+      (listParentKey === "Precases" || listParentKey === "Aftercases" || listParentKey === "Inherit")
+    ) {
+      return this.normalizeValue(listItem[1]);
+    }
+
+    return undefined;
+  }
+
+  private uniqueLocations(locations: vscode.Location[]): vscode.Location[] {
+    const seen = new Set<string>();
+    return locations.filter((loc) => {
+      const key = `${loc.uri.fsPath}:${loc.range.start.line}:${loc.range.start.character}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
   }
 
   private isClickedOnDefinition(

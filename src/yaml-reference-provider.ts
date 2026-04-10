@@ -30,7 +30,7 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
   ): vscode.Location[] {
     this.logger?.startPerformanceLog("Total time: provideReferences");
 
-    const name = this.getClicked(document, position);
+    const name = this.getSemanticNameAtPosition(document, position) ?? this.getClicked(document, position);
     this.logger?.log("Looking for references of: ", name);
 
     const cacheKey = `${vscode.workspace.name}-${name}-refs`;
@@ -44,6 +44,7 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
 
     const root = getWorkspaceRoot();
     const filesContentMap = getFilesContentMap(root);
+    const frameworkContext = this.isFrameworkReferenceContext(document, position);
     const frameworkLocations = this.getFrameworkReferences(
       document,
       position,
@@ -51,7 +52,9 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
       filesContentMap
     );
     const locations =
-      frameworkLocations.length > 0
+      frameworkContext
+        ? frameworkLocations
+        : frameworkLocations.length > 0
         ? frameworkLocations
         : this.getLocations(getFilesReferencesInLinesMap(filesContentMap, name));
     this.cache?.set(cacheKey, locations);
@@ -155,37 +158,101 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
   ): vscode.Location[] {
     const name = this.normalizeValue(rawName);
     const currentKey = this.getCurrentKey(document, position);
+    const lineText = document.lineAt(position.line).text;
+    const fullLineKey = lineText.trimStart().match(/^-?\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:/)?.[1];
+    const effectiveKey = currentKey ?? fullLineKey;
     const listParentKey = this.getListParentKey(document, position);
     if (!name) {
       return [];
     }
 
+    if (this.isCaseDefinitionCursor(document, position, name)) {
+      return this.uniqueLocations([
+        ...this.findCaseReferences(filesContentMap, name),
+        ...this.findStepReferencesByCaseName(filesContentMap, name),
+      ]);
+    }
+
+    if (this.isStepDefinitionCursor(document, position, name)) {
+      const caseNames = this.getCaseNamesForStepText(filesContentMap, name);
+      return this.uniqueLocations([
+        ...this.findStepReferences(filesContentMap, name),
+        ...caseNames.flatMap((caseName) => this.findCaseReferences(filesContentMap, caseName)),
+      ]);
+    }
+
     if (
-      (currentKey === "Value" && this.isCaseValueContext(document, position)) ||
-      currentKey === "Case" ||
+      (effectiveKey === "Value" && this.isCaseValueContext(document, position)) ||
+      effectiveKey === "Case" ||
       listParentKey === "Precases" ||
       listParentKey === "Aftercases"
     ) {
-      return this.findCaseReferences(filesContentMap, name);
+      return this.uniqueLocations([
+        ...this.findCaseReferences(filesContentMap, name),
+        ...this.findStepReferences(filesContentMap, name),
+      ]);
     }
 
-    if (currentKey && GHERKIN_KEYS.includes(currentKey)) {
-      return this.findStepReferences(filesContentMap, name);
+    if (effectiveKey && GHERKIN_KEYS.includes(effectiveKey)) {
+      const caseNames = this.getCaseNamesForStepText(filesContentMap, name);
+      return this.uniqueLocations([
+        ...this.findStepReferences(filesContentMap, name),
+        ...caseNames.flatMap((caseName) => this.findCaseReferences(filesContentMap, caseName)),
+      ]);
     }
 
-    if (currentKey === "Environment" || listParentKey === "Inherit") {
+    if (effectiveKey === "Environment" || listParentKey === "Inherit") {
       return this.findEnvironmentReferences(filesContentMap, name);
     }
 
-    if (currentKey === "App" || currentKey === "app") {
+    if (effectiveKey === "App" || effectiveKey === "app") {
       return this.findAppReferences(filesContentMap, name);
     }
 
-    if (currentKey === "Role" || currentKey === "role") {
+    if (effectiveKey === "Role" || effectiveKey === "role") {
       return this.findRoleReferences(filesContentMap, name);
     }
 
     return [];
+  }
+
+  private isFrameworkReferenceContext(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): boolean {
+    const currentKey = this.getCurrentKey(document, position);
+    const listParentKey = this.getListParentKey(document, position);
+    const line = document.lineAt(position.line).text;
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    const fullLineKey = line.trimStart().match(/^-?\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:/)?.[1];
+    const effectiveKey = currentKey ?? fullLineKey;
+
+    if (
+      (effectiveKey === "Value" && this.isCaseValueContext(document, position)) ||
+      effectiveKey === "Case" ||
+      effectiveKey === "Step" ||
+      effectiveKey === "Environment" ||
+      effectiveKey === "App" ||
+      effectiveKey === "app" ||
+      effectiveKey === "Role" ||
+      effectiveKey === "role" ||
+      listParentKey === "Precases" ||
+      listParentKey === "Aftercases" ||
+      listParentKey === "Inherit" ||
+      (effectiveKey && GHERKIN_KEYS.includes(effectiveKey))
+    ) {
+      return true;
+    }
+
+    const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+    if (indent === 0 && topDef && !ROOT_NON_CASE_KEYS.has(topDef[1])) {
+      const start = line.indexOf(topDef[1]);
+      const end = start + topDef[1].length;
+      return position.character >= start && position.character <= end;
+    }
+
+    return false;
   }
 
   private findCaseReferences(filesContentMap: FilesContentMap, name: string): vscode.Location[] {
@@ -233,7 +300,7 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
       lines.forEach((line, index) => {
         const trimmed = line.trim();
         for (const key of GHERKIN_KEYS) {
-          const match = trimmed.match(new RegExp(`^${key}\\s*:\\s*(.+)$`));
+          const match = trimmed.match(new RegExp(`^-?\\s*${key}\\s*:\\s*(.+)$`));
           if (match && this.normalizeValue(match[1]) === stepName) {
             locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
             return;
@@ -242,6 +309,79 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
       });
     });
     return locations;
+  }
+
+  private findStepReferencesByCaseName(
+    filesContentMap: FilesContentMap,
+    caseName: string
+  ): vscode.Location[] {
+    const stepTexts = this.getStepTextsForCaseName(filesContentMap, caseName);
+    return this.uniqueLocations(
+      stepTexts.flatMap((stepText) => this.findStepReferences(filesContentMap, stepText))
+    );
+  }
+
+  private getCaseNamesForStepText(
+    filesContentMap: FilesContentMap,
+    stepText: string
+  ): string[] {
+    const names = new Set<string>();
+    Object.values(filesContentMap).forEach((lines) => {
+      let currentCaseName: string | undefined;
+      lines.forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) {
+          return;
+        }
+        const indent = line.length - line.trimStart().length;
+        const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+        if (indent === 0 && topDef) {
+          currentCaseName = ROOT_NON_CASE_KEYS.has(topDef[1]) ? undefined : topDef[1];
+          return;
+        }
+        if (!currentCaseName) {
+          return;
+        }
+        const stepMatch = trimmed.match(/^Step\s*:\s*(.+)$/);
+        if (stepMatch && this.normalizeValue(stepMatch[1]) === stepText) {
+          names.add(currentCaseName);
+        }
+      });
+    });
+    return [...names];
+  }
+
+  private getStepTextsForCaseName(
+    filesContentMap: FilesContentMap,
+    caseName: string
+  ): string[] {
+    const steps = new Set<string>();
+    Object.values(filesContentMap).forEach((lines) => {
+      let currentCaseName: string | undefined;
+      lines.forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) {
+          return;
+        }
+        const indent = line.length - line.trimStart().length;
+        const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+        if (indent === 0 && topDef) {
+          currentCaseName = ROOT_NON_CASE_KEYS.has(topDef[1]) ? undefined : topDef[1];
+          return;
+        }
+        if (currentCaseName !== caseName) {
+          return;
+        }
+        const stepMatch = trimmed.match(/^Step\s*:\s*(.+)$/);
+        if (stepMatch) {
+          const stepText = this.normalizeValue(stepMatch[1]);
+          if (stepText) {
+            steps.add(stepText);
+          }
+        }
+      });
+    });
+    return [...steps];
   }
 
   private findEnvironmentReferences(
@@ -442,5 +582,100 @@ export class YamlReferenceProvider implements vscode.ReferenceProvider {
     }
     const key = this.getCliVarName(normalized);
     return [...(varsMap.get(key) ?? [])];
+  }
+
+  private getSemanticNameAtPosition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): string | undefined {
+    const line = document.lineAt(position).text;
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    const currentKey = this.getCurrentKey(document, position);
+    const listParentKey = this.getListParentKey(document, position);
+    const fullLineKey = line.trimStart().match(/^-?\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:/)?.[1];
+    const effectiveKey = currentKey ?? fullLineKey;
+
+    const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+    if (indent === 0 && topDef && !ROOT_NON_CASE_KEYS.has(topDef[1])) {
+      const start = line.indexOf(topDef[1]);
+      const end = start + topDef[1].length;
+      if (position.character >= start && position.character <= end) {
+        return topDef[1];
+      }
+    }
+
+    if (
+      effectiveKey === "Value" ||
+      effectiveKey === "Case" ||
+      effectiveKey === "Step" ||
+      effectiveKey === "Environment" ||
+      effectiveKey === "Role" ||
+      effectiveKey === "role" ||
+      effectiveKey === "App" ||
+      effectiveKey === "app" ||
+      (effectiveKey && GHERKIN_KEYS.includes(effectiveKey))
+    ) {
+      const colon = line.indexOf(":");
+      if (colon >= 0 && position.character > colon) {
+        const value = this.normalizeValue(line.slice(colon + 1));
+        if (value) {
+          return value;
+        }
+      }
+    }
+
+    const listItem = trimmed.match(/^-\s*(.+)$/);
+    if (
+      listItem &&
+      (listParentKey === "Precases" || listParentKey === "Aftercases" || listParentKey === "Inherit")
+    ) {
+      return this.normalizeValue(listItem[1]);
+    }
+
+    return undefined;
+  }
+
+  private isCaseDefinitionCursor(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    name: string
+  ): boolean {
+    const line = document.lineAt(position.line).text;
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    const topDef = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
+    if (!topDef || indent !== 0 || ROOT_NON_CASE_KEYS.has(topDef[1]) || topDef[1] !== name) {
+      return false;
+    }
+    const start = line.indexOf(topDef[1]);
+    const end = start + topDef[1].length;
+    return position.character >= start && position.character <= end;
+  }
+
+  private isStepDefinitionCursor(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    stepText: string
+  ): boolean {
+    const line = document.lineAt(position.line).text;
+    const m = line.trim().match(/^Step\s*:\s*(.+)$/);
+    if (!m) {
+      return false;
+    }
+    const colon = line.indexOf(":");
+    return position.character > colon && this.normalizeValue(m[1]) === stepText;
+  }
+
+  private uniqueLocations(locations: vscode.Location[]): vscode.Location[] {
+    const seen = new Set<string>();
+    return locations.filter((loc) => {
+      const key = `${loc.uri.fsPath}:${loc.range.start.line}:${loc.range.start.character}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
   }
 }
