@@ -2,15 +2,10 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { getFilesContentMap } from "./core/get-files-content-map";
 import { getWorkspaceRoot } from "./utils/get-workspace-root";
-
 import { Cache } from "./utils/cache";
 import { ILogger } from "./utils/logger";
-import {
-  getFilesFoundInLinesMap,
-  FilesFoundInLinesMap,
-  isDefinition,
-} from "./core/get-files-found-in-lines-map";
 import { getFilesReferencesInLinesMap } from "./core/get-files-references-in-lines-map";
+import { FilesFoundInLinesMap } from "./core/get-files-found-in-lines-map";
 import { FilesContentMap } from "./core/get-files-content-map";
 
 const GHERKIN_KEYS = ["Given", "Then", "And", "But", "When"];
@@ -23,39 +18,33 @@ const ROOT_NON_CASE_KEYS = new Set([
 ]);
 const CLI_VAR_PATTERN = /^\$AND_CLI_([A-Za-z0-9_]+)\$$/;
 
-export class YamlDefinitionProvider implements vscode.DefinitionProvider {
+export class YamlReferenceProvider implements vscode.ReferenceProvider {
   constructor(
     private cache?: Cache<vscode.Location[]>,
     private logger?: ILogger
   ) {}
 
-  provideDefinition(
+  provideReferences(
     document: vscode.TextDocument,
     position: vscode.Position
   ): vscode.Location[] {
-    this.logger?.startPerformanceLog("Total time: provideDefinition");
+    this.logger?.startPerformanceLog("Total time: provideReferences");
 
     const name = this.getClicked(document, position);
-    this.logger?.log("Looking for defenition of: ", name);
+    this.logger?.log("Looking for references of: ", name);
 
-    const cacheKey = `${vscode.workspace.name}-${name}`;
+    const cacheKey = `${vscode.workspace.name}-${name}-refs`;
     const cachedResult = this.cache?.get(cacheKey);
 
     if (cachedResult) {
-      this.logger?.endPerformanceLog("Total time: provideDefinition");
-      this.logger?.log("Returning cached result");
-
+      this.logger?.endPerformanceLog("Total time: provideReferences");
+      this.logger?.log("Returning cached references result");
       return cachedResult;
     }
 
     const root = getWorkspaceRoot();
-
-    this.logger?.startPerformanceLog("Total time: getFilesFoundInLinesMap");
-    this.logger?.startPerformanceLog("Total time: getFilesContentMap");
     const filesContentMap = getFilesContentMap(root);
-    this.logger?.endPerformanceLog("Total time: getFilesContentMap");
-
-    const frameworkLocations = this.getFrameworkLocations(
+    const frameworkLocations = this.getFrameworkReferences(
       document,
       position,
       name,
@@ -64,16 +53,9 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     const locations =
       frameworkLocations.length > 0
         ? frameworkLocations
-        : this.getLocations(
-            this.isClickedOnDefinition(document, position, name)
-              ? getFilesReferencesInLinesMap(filesContentMap, name)
-              : getFilesFoundInLinesMap(filesContentMap, name)
-          );
-    this.logger?.endPerformanceLog("Total time: getFilesFoundInLinesMap");
-
+        : this.getLocations(getFilesReferencesInLinesMap(filesContentMap, name));
     this.cache?.set(cacheKey, locations);
-
-    this.logger?.endPerformanceLog("Total time: provideDefinition");
+    this.logger?.endPerformanceLog("Total time: provideReferences");
 
     return locations;
   }
@@ -121,79 +103,6 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     return keyMatch?.[1];
   }
 
-  private isCaseValueContext(document: vscode.TextDocument, position: vscode.Position): boolean {
-    for (let line = position.line; line >= 0; line -= 1) {
-      const text = document.lineAt(line).text;
-      const trimmed = text.trim();
-      if (trimmed.length === 0 || trimmed.startsWith("#")) {
-        continue;
-      }
-
-      if (/^-/.test(trimmed) && line !== position.line) {
-        return false;
-      }
-
-      const typeMatch = trimmed.match(/^Type\s*:\s*(.+)$/);
-      if (typeMatch) {
-        return this.normalizeValue(typeMatch[1]) === "case";
-      }
-    }
-    return false;
-  }
-
-  private getFrameworkLocations(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    rawName: string,
-    filesContentMap: FilesContentMap
-  ): vscode.Location[] {
-    const name = this.normalizeValue(rawName);
-    const currentKey = this.getCurrentKey(document, position);
-    const listParentKey = this.getListParentKey(document, position);
-    if (!name) {
-      return [];
-    }
-
-    if (
-      (currentKey === "Value" && this.isCaseValueContext(document, position)) ||
-      currentKey === "Case" ||
-      listParentKey === "Precases" ||
-      listParentKey === "Aftercases"
-    ) {
-      return this.findCaseDefinitions(filesContentMap, name);
-    }
-
-    if (currentKey && GHERKIN_KEYS.includes(currentKey)) {
-      return this.findStepDefinitions(filesContentMap, name);
-    }
-
-    if (currentKey === "Environment" || listParentKey === "Inherit") {
-      return this.isConfigDefinitionContext(document)
-        ? this.findEnvironmentReferences(filesContentMap, name)
-        : this.findEnvironmentDefinitions(filesContentMap, name);
-    }
-
-    if (currentKey === "App" || currentKey === "app") {
-      return this.isConfigDefinitionContext(document)
-        ? this.findAppReferences(filesContentMap, name)
-        : this.findAppDefinitions(filesContentMap, name);
-    }
-
-    if (currentKey === "Role" || currentKey === "role") {
-      if (this.isCliVar(name)) {
-        if (this.isMainRoleVar(name)) {
-          return [];
-        }
-        return this.findVarDefinitions(filesContentMap, this.getCliVarName(name));
-      }
-      return this.isRoleDefinitionContext(document, position) || this.isConfigDefinitionContext(document)
-        ? this.findRoleReferences(filesContentMap, name)
-        : this.findRoleDefinitions(filesContentMap, name);
-    }
-
-    return [];
-  }
-
   private getListParentKey(document: vscode.TextDocument, position: vscode.Position): string | undefined {
     const current = document.lineAt(position).text.slice(0, position.character).trimStart();
     if (!current.startsWith("-")) {
@@ -218,128 +127,121 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     return undefined;
   }
 
-  private findCaseDefinitions(filesContentMap: FilesContentMap, name: string): vscode.Location[] {
-    return this.findByLinePredicate(filesContentMap, (line) => {
-      const match = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
-      if (!match) {
+  private isCaseValueContext(document: vscode.TextDocument, position: vscode.Position): boolean {
+    for (let line = position.line; line >= 0; line -= 1) {
+      const text = document.lineAt(line).text;
+      const trimmed = text.trim();
+      if (trimmed.length === 0 || trimmed.startsWith("#")) {
+        continue;
+      }
+
+      if (/^-/.test(trimmed) && line !== position.line) {
         return false;
       }
-      const indentation = line.length - line.trimStart().length;
-      return indentation === 0 && !ROOT_NON_CASE_KEYS.has(match[1]) && match[1] === name;
-    });
-  }
 
-  private findStepDefinitions(filesContentMap: FilesContentMap, stepText: string): vscode.Location[] {
-    return this.findByLinePredicate(filesContentMap, (line) => {
-      const match = line.trim().match(/^Step\s*:\s*(.+)$/);
-      if (!match) {
-        return false;
+      const typeMatch = trimmed.match(/^Type\s*:\s*(.+)$/);
+      if (typeMatch) {
+        return this.normalizeValue(typeMatch[1]) === "case";
       }
-      return this.normalizeValue(match[1]) === stepText;
-    });
+    }
+    return false;
   }
 
-  private findEnvironmentDefinitions(
-    filesContentMap: FilesContentMap,
-    environmentName: string
-  ): vscode.Location[] {
-    const locations: vscode.Location[] = [];
-
-    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      if (!this.isConfigPath(filePath)) {
-        return;
-      }
-      let inEnvironments = false;
-      let environmentsIndent = 0;
-
-      lines.forEach((line, index) => {
-        const trimmed = line.trim();
-        if (!inEnvironments && /^Environments\s*:\s*$/.test(trimmed)) {
-          inEnvironments = true;
-          environmentsIndent = line.length - line.trimStart().length;
-          return;
-        }
-
-        const indent = line.length - line.trimStart().length;
-        if (inEnvironments && indent <= environmentsIndent && trimmed.length > 0) {
-          inEnvironments = false;
-        }
-        if (!inEnvironments) {
-          return;
-        }
-
-        const match = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
-        if (!match || match[1] !== environmentName) {
-          return;
-        }
-
-        locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
-      });
-    });
-
-    return locations;
-  }
-
-  private findRoleDefinitions(filesContentMap: FilesContentMap, roleName: string): vscode.Location[] {
-    const locations: vscode.Location[] = [];
-    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      if (!this.isConfigPath(filePath)) {
-        return;
-      }
-      lines.forEach((line, index) => {
-        const match = line.trim().match(/^-?\s*role\s*:\s*(.+)$/);
-        if (!match) {
-          return;
-        }
-        const values = this.normalizeValue(match[1])
-          .split(",")
-          .map((part) => part.trim());
-        if (!values.includes(roleName)) {
-          return;
-        }
-        locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
-      });
-    });
-    return locations;
-  }
-
-  private findRoleReferences(filesContentMap: FilesContentMap, roleName: string): vscode.Location[] {
-    const locations: vscode.Location[] = [];
-    const varsMap = this.buildVarsMap(filesContentMap);
-    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      lines.forEach((line, index) => {
-        const match = line.trim().match(/^-?\s*(Role|role)\s*:\s*(.+)$/);
-        if (!match) {
-          return;
-        }
-        if (this.isConfigPath(filePath) && match[1] === "role") {
-          return;
-        }
-        const values = this.normalizeValue(match[2])
-          .split(",")
-          .map((part) => part.trim())
-          .flatMap((part) => this.resolveRoleToken(part, varsMap));
-        if (!values.includes(roleName)) {
-          return;
-        }
-        locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
-      });
-    });
-    return locations;
-  }
-
-  private isRoleDefinitionContext(
+  private getFrameworkReferences(
     document: vscode.TextDocument,
-    position: vscode.Position
-  ): boolean {
+    position: vscode.Position,
+    rawName: string,
+    filesContentMap: FilesContentMap
+  ): vscode.Location[] {
+    const name = this.normalizeValue(rawName);
     const currentKey = this.getCurrentKey(document, position);
-    if (currentKey !== "role" || !this.isConfigPath(document.fileName)) {
-      return false;
+    const listParentKey = this.getListParentKey(document, position);
+    if (!name) {
+      return [];
     }
 
-    const lineText = document.lineAt(position.line).text;
-    const colonIdx = lineText.indexOf(":");
-    return colonIdx >= 0 && position.character > colonIdx;
+    if (
+      (currentKey === "Value" && this.isCaseValueContext(document, position)) ||
+      currentKey === "Case" ||
+      listParentKey === "Precases" ||
+      listParentKey === "Aftercases"
+    ) {
+      return this.findCaseReferences(filesContentMap, name);
+    }
+
+    if (currentKey && GHERKIN_KEYS.includes(currentKey)) {
+      return this.findStepReferences(filesContentMap, name);
+    }
+
+    if (currentKey === "Environment" || listParentKey === "Inherit") {
+      return this.findEnvironmentReferences(filesContentMap, name);
+    }
+
+    if (currentKey === "App" || currentKey === "app") {
+      return this.findAppReferences(filesContentMap, name);
+    }
+
+    if (currentKey === "Role" || currentKey === "role") {
+      return this.findRoleReferences(filesContentMap, name);
+    }
+
+    return [];
+  }
+
+  private findCaseReferences(filesContentMap: FilesContentMap, name: string): vscode.Location[] {
+    const locations: vscode.Location[] = [];
+    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
+      lines.forEach((line, index) => {
+        const trimmed = line.trim();
+        const currentIndent = line.length - line.trimStart().length;
+
+        const typeCaseValueMatch = trimmed.match(/^Value\s*:\s*(.+)$/);
+        if (typeCaseValueMatch) {
+          const value = this.normalizeValue(typeCaseValueMatch[1]);
+          if (value === name && this.previousActionTypeIsCase(lines, index, currentIndent)) {
+            locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
+          }
+        }
+
+        const listItemMatch = trimmed.match(/^-\s*(.+)$/);
+        if (listItemMatch) {
+          const value = this.normalizeValue(listItemMatch[1]);
+          if (value !== name) {
+            return;
+          }
+          const parent = this.getParentCollectionKey(lines, index, currentIndent);
+          if (parent === "Precases" || parent === "Aftercases") {
+            locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
+          }
+        }
+
+        const setCaseMatch = trimmed.match(/^Case\s*:\s*(.+)$/);
+        if (setCaseMatch) {
+          const value = this.normalizeValue(setCaseMatch[1]);
+          if (value === name && this.isUnderCasesCollection(lines, index, currentIndent)) {
+            locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
+          }
+        }
+      });
+    });
+    return locations;
+  }
+
+  private findStepReferences(filesContentMap: FilesContentMap, stepName: string): vscode.Location[] {
+    const locations: vscode.Location[] = [];
+    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
+      lines.forEach((line, index) => {
+        const trimmed = line.trim();
+        for (const key of GHERKIN_KEYS) {
+          const match = trimmed.match(new RegExp(`^${key}\\s*:\\s*(.+)$`));
+          if (match && this.normalizeValue(match[1]) === stepName) {
+            locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
+            return;
+          }
+        }
+      });
+    });
+    return locations;
   }
 
   private findEnvironmentReferences(
@@ -365,7 +267,7 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
         if (value !== environmentName) {
           return;
         }
-        const parent = this.getListParentKeyFromLines(lines, index, currentIndent);
+        const parent = this.getParentCollectionKey(lines, index, currentIndent);
         if (parent === "Inherit") {
           locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
         }
@@ -374,30 +276,24 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     return locations;
   }
 
-  private findAppDefinitions(filesContentMap: FilesContentMap, appName: string): vscode.Location[] {
+  private findRoleReferences(filesContentMap: FilesContentMap, roleName: string): vscode.Location[] {
     const locations: vscode.Location[] = [];
+    const varsMap = this.buildVarsMap(filesContentMap);
     Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      if (!this.isConfigPath(filePath)) {
-        return;
-      }
-      let inApps = false;
-      let appsIndent = 0;
       lines.forEach((line, index) => {
         const trimmed = line.trim();
-        if (!inApps && /^Apps\s*:\s*$/.test(trimmed)) {
-          inApps = true;
-          appsIndent = line.length - line.trimStart().length;
+        const match = trimmed.match(/^-?\s*(Role|role)\s*:\s*(.+)$/);
+        if (!match) {
           return;
         }
-        const indent = line.length - line.trimStart().length;
-        if (inApps && indent <= appsIndent && trimmed.length > 0) {
-          inApps = false;
-        }
-        if (!inApps) {
+        if (this.isConfigPath(filePath) && match[1] === "role") {
           return;
         }
-        const match = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*$/);
-        if (match && match[1] === appName && indent === appsIndent + 2) {
+        const values = this.normalizeValue(match[2])
+          .split(",")
+          .map((part) => part.trim())
+          .flatMap((part) => this.resolveRoleToken(part, varsMap));
+        if (values.includes(roleName)) {
           locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
         }
       });
@@ -422,17 +318,44 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     return locations;
   }
 
-  private getListParentKeyFromLines(
+  private previousActionTypeIsCase(
+    lines: FileContentLine[],
+    lineIndex: number,
+    currentIndent: number
+  ): boolean {
+    for (let i = lineIndex - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (trimmed.length === 0 || trimmed.startsWith("#")) {
+        continue;
+      }
+      const indent = line.length - line.trimStart().length;
+      if (indent < currentIndent) {
+        return false;
+      }
+      if (indent === currentIndent && /^Type\s*:\s*(.+)$/.test(trimmed)) {
+        const match = trimmed.match(/^Type\s*:\s*(.+)$/);
+        return match ? this.normalizeValue(match[1]) === "case" : false;
+      }
+      if (indent === currentIndent && /^-\s/.test(trimmed)) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  private getParentCollectionKey(
     lines: FileContentLine[],
     lineIndex: number,
     currentIndent: number
   ): string | undefined {
     for (let i = lineIndex - 1; i >= 0; i -= 1) {
-      const trimmed = lines[i].trim();
+      const line = lines[i];
+      const trimmed = line.trim();
       if (trimmed.length === 0 || trimmed.startsWith("#")) {
         continue;
       }
-      const indent = lines[i].length - lines[i].trimStart().length;
+      const indent = line.length - line.trimStart().length;
       if (indent < currentIndent) {
         const keyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*$/);
         return keyMatch?.[1];
@@ -441,12 +364,16 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     return undefined;
   }
 
-  private isConfigPath(filePath: string): boolean {
-    return path.basename(filePath).toLowerCase() === "config.yaml";
+  private isUnderCasesCollection(
+    lines: FileContentLine[],
+    lineIndex: number,
+    currentIndent: number
+  ): boolean {
+    return this.getParentCollectionKey(lines, lineIndex, currentIndent) === "Cases";
   }
 
-  private isConfigDefinitionContext(document: vscode.TextDocument): boolean {
-    return this.isConfigPath(document.fileName);
+  private isConfigPath(filePath: string): boolean {
+    return path.basename(filePath).toLowerCase() === "config.yaml";
   }
 
   private isCliVar(name: string): boolean {
@@ -515,49 +442,5 @@ export class YamlDefinitionProvider implements vscode.DefinitionProvider {
     }
     const key = this.getCliVarName(normalized);
     return [...(varsMap.get(key) ?? [])];
-  }
-
-  private findVarDefinitions(
-    filesContentMap: FilesContentMap,
-    varName: string
-  ): vscode.Location[] {
-    const locations: vscode.Location[] = [];
-    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      lines.forEach((line, index) => {
-        if (!this.isInsideVarsSection(lines, index)) {
-          return;
-        }
-        const match = line.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/);
-        if (!match || match[1] !== varName) {
-          return;
-        }
-        locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
-      });
-    });
-    return locations;
-  }
-
-  private findByLinePredicate(
-    filesContentMap: FilesContentMap,
-    predicate: (line: string, lineIndex: number) => boolean
-  ): vscode.Location[] {
-    const locations: vscode.Location[] = [];
-    Object.entries(filesContentMap).forEach(([filePath, lines]) => {
-      lines.forEach((line, index) => {
-        if (predicate(line, index)) {
-          locations.push(this.createLocationFromFilePathAndLineNumber(filePath, index + 1));
-        }
-      });
-    });
-    return locations;
-  }
-
-  private isClickedOnDefinition(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    name: string
-  ): boolean {
-    const currentLine = document.lineAt(position.line).text;
-    return isDefinition(currentLine, name);
   }
 }

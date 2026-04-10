@@ -17,7 +17,7 @@ function findMatchingLineNumbers(
   }, []);
 }
 
-function isDefinition(line: string, searchText: string): boolean {
+export function isDefinition(line: string, searchText: string): boolean {
   const searchTextWithColon =
     searchText.at(-1) === ":" ? searchText : searchText + ":";
 

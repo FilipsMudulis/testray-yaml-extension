@@ -1,6 +1,6 @@
 {
-  "name": "yaml-go-to-definition",
-  "version": "0.0.8",
+  "name": "testray-yaml-extension",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.86.0"
   },
@@ -26,20 +26,38 @@
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.16",
     "@types/vscode": "^1.86.0",
+    "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.20.2",
     "jest": "^29.7.0",
     "typescript": "^5.3.3"
   },
-  "displayName": "yaml-go-to-definition",
-  "description": "This is a simple extension that allows you to go to the definition of a whatever in a yaml file.",
-  "publisher": "GolovinDaniil",
-  "icon": "logo.png",
+  "displayName": "TestRay YAML Extension",
+  "description": "TestRay-aware YAML tooling for VS Code/Cursor: go to definition, references, rename, diagnostics, completion, hover, symbols, and inlay hints.",
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Snippets"
+  ],
+  "keywords": [
+    "testray",
+    "yaml",
+    "automation",
+    "testing",
+    "go to definition",
+    "references",
+    "rename",
+    "diagnostics",
+    "hover",
+    "inlay hints"
+  ],
+  "license": "MIT",
+  "publisher": "FilipsMudulis",
   "author": {
-    "name": "Daniil Golovin",
-    "email": "golovin.daniely@gmail.com"
+    "name": "Filips Mudulis",
+    "email": "filips.mudulis@testdevlab.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/DanielGolovin/yaml-go-to-definition"
+    "url": "https://github.com/FilipsMudulis/testray-yaml-extension"
   }
 }
